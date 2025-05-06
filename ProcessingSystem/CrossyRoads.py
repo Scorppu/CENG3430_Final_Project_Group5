@@ -4,6 +4,15 @@ import sys
 import math
 import os
 
+# PYNQ-specific imports and initialization
+try:
+    from pynq import Overlay
+    from pynq.lib.video import *
+    from pynq.lib import Button, Switch
+    PYNQ_AVAILABLE = True
+except ImportError:
+    PYNQ_AVAILABLE = False
+
 # Initialize pygame
 pygame.init()
 
@@ -70,6 +79,251 @@ screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Crossy Roads")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont('Arial', 20)
+
+# Initialize PYNQ hardware if available
+pynq_initialized = False
+pynq_frame_out = None
+pynq_hdmi_out = None
+btnU = btnL = btnR = btnD = None
+switchQ = switchR = None
+difficulty_switches = []
+
+def init_pynq():
+    """Initialize PYNQ hardware components"""
+    global pynq_initialized, pynq_frame_out, pynq_hdmi_out
+    global btnU, btnL, btnR, btnD, switchQ, switchR, difficulty_switches
+    
+    if not PYNQ_AVAILABLE:
+        return False
+    
+    try:
+        # Load the overlay (bitstream) for hardware acceleration
+        overlay = Overlay("/home/xilinx/pynq/overlays/base/base.bit")
+        
+        # Set up video output
+        pynq_hdmi_out = overlay.video.hdmi_out
+        pynq_hdmi_out.configure(VideoMode(SCREEN_WIDTH, SCREEN_HEIGHT, 24))
+        pynq_frame_out = pynq_hdmi_out.newframe()
+        
+        # Set up buttons and switches
+        # For a typical Zedboard with PYNQ:
+        # - Use the 4 push buttons for directional movement
+        btnU = Button(0)  # Up (assuming button 0 is up)
+        btnL = Button(1)  # Left
+        btnR = Button(2)  # Right
+        btnD = Button(3)  # Down (not used in game, but available)
+        
+        switchQ = Switch(0)  # Quit
+        switchR = Switch(1)  # Restart when game over
+        
+        # Set up difficulty switches (0-10)
+        difficulty_switches = []
+        for i in range(2, 6):  # Switches 2-5 for binary difficulty (0-15)
+            if i < len(overlay.switches):
+                difficulty_switches.append(Switch(i))
+            else:
+                difficulty_switches.append(None)
+                
+        pynq_initialized = True
+        print("PYNQ hardware initialized successfully for CrossyRoads")
+        return True
+    except Exception as e:
+        print(f"Error initializing PYNQ hardware: {e}")
+        return False
+
+def get_input_PYNQ():
+    """Handle PYNQ button/switch inputs and return player action in a discrete manner"""
+    global DIFFICULTY
+    
+    if not pynq_initialized:
+        return get_input()  # Fall back to regular input
+    
+    current_time = pygame.time.get_ticks()
+    movement_ready = current_time - last_move_time >= GRID_MOVE_COOLDOWN
+    
+    # Check for quit signal
+    if switchQ.read():
+        return 'Q'
+    
+    # Check for restart when game over
+    if game_over and switchR.read():
+        return 'R'
+    
+    # Check for difficulty adjustment using binary switches
+    difficulty_value = 0
+    difficulty_changed = False
+    for i, switch in enumerate(difficulty_switches):
+        if switch is not None and switch.read():
+            difficulty_value += 2**i
+            difficulty_changed = True
+    
+    if difficulty_changed:
+        # Clamp difficulty between 1-10
+        new_difficulty = max(1, min(10, difficulty_value))
+        if new_difficulty != DIFFICULTY:
+            change_difficulty(new_difficulty)
+    
+    # Only allow discrete movements when not currently in a hop animation and cooldown has passed
+    if not hopping and movement_ready:
+        movement = {'x': 0, 'y': 0}
+        
+        # Check buttons for movement (only one direction at a time)
+        if btnU.read():
+            movement['y'] = -1  # Move up one grid space
+        elif btnL.read():
+            movement['x'] = -1  # Move left one grid space
+        elif btnR.read():
+            movement['x'] = 1   # Move right one grid space
+        # No backward movement allowed
+        # elif btnD.read():
+        #     movement['y'] = 1   # Move down one grid space
+        
+        # Only return movement if any button was pressed
+        if movement['x'] != 0 or movement['y'] != 0:
+            return movement
+    
+    return None
+
+def output_PYNQ(message=None):
+    """Render the game to the PYNQ HDMI output"""
+    global pynq_frame_out
+    
+    if not pynq_initialized:
+        output(message)  # Fall back to regular output
+        return
+    
+    # First render to a pygame surface (same as regular output)
+    pynq_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+    output_to_surface(pynq_surface, message)
+    
+    # Get raw pixel data from pygame surface
+    pixel_data = pygame.surfarray.array3d(pynq_surface)
+    
+    # Transfer pixel data to PYNQ frame
+    try:
+        for y in range(min(SCREEN_HEIGHT, pynq_frame_out.height)):
+            for x in range(min(SCREEN_WIDTH, pynq_frame_out.width)):
+                if x < len(pixel_data) and y < len(pixel_data[0]):
+                    r, g, b = pixel_data[x][y]
+                    pynq_frame_out[y, x] = (r, g, b)
+        
+        # Send the frame to the HDMI output
+        pynq_hdmi_out.writeframe(pynq_frame_out)
+        pynq_frame_out = pynq_hdmi_out.newframe()  # Prepare next frame
+    except Exception as e:
+        print(f"Error rendering to PYNQ display: {e}")
+        # Fall back to regular output if something goes wrong
+        output(message)
+
+def output_to_surface(surface, message=None):
+    """Helper function to render the game to any pygame surface"""
+    # This is essentially a copy of the output function but renders to the provided surface
+    # Fill the background with green
+    surface.fill(GREEN)
+    
+    # Draw lanes (roads and safe zones)
+    for lane in lanes:
+        lane_top = lane['y'] - camera_y
+        lane_height = lane['height']
+        lane_bottom = lane_top - lane_height
+        
+        # Skip lanes that are completely outside the visible area
+        if lane_bottom > VISIBLE_GRID_HEIGHT or lane_top < 0:
+            continue
+
+        # Convert to screen coordinates
+        screen_top = lane_top * CELL_SIZE
+        
+        # Calculate visible portion of the lane
+        visible_top = min(screen_top, SCREEN_HEIGHT)
+        visible_bottom = max(0, screen_top - lane_height * CELL_SIZE)
+        visible_height = visible_top - visible_bottom
+        
+        # Create rectangle for the visible portion
+        lane_rect = pygame.Rect(0, visible_bottom, SCREEN_WIDTH, visible_height)
+        
+        if lane['is_safe']:
+            # Safe zone (green grass) - simplified for PYNQ
+            pygame.draw.rect(surface, GREEN, lane_rect)
+        else:
+            # Road with multiple lanes - simplified for PYNQ
+            pygame.draw.rect(surface, GRAY, lane_rect)
+            
+            # Draw lane dividers for multi-lane roads
+            if lane.get('num_lanes', 1) > 1:
+                for i in range(1, lane['num_lanes']):
+                    # Calculate divider position
+                    divider_y_pos = lane_top - (i * lane_height / lane['num_lanes'])
+                    # Only draw if visible
+                    if 0 <= divider_y_pos <= VISIBLE_GRID_HEIGHT:
+                        divider_y = divider_y_pos * CELL_SIZE
+                        pygame.draw.line(surface, WHITE, (0, divider_y), (SCREEN_WIDTH, divider_y), 2)
+            
+            # Draw central yellow line for each lane
+            for i in range(lane.get('num_lanes', 1)):
+                # Calculate central line position
+                central_y_pos = lane_top - ((i + 0.5) * lane_height / lane.get('num_lanes', 1))
+                # Only draw if visible
+                if 0 <= central_y_pos <= VISIBLE_GRID_HEIGHT:
+                    central_y = central_y_pos * CELL_SIZE
+                    for x in range(0, SCREEN_WIDTH, 40):
+                        pygame.draw.line(surface, YELLOW, (x, central_y), (x + 20, central_y), 3)
+    
+    # Draw cars (simplified for PYNQ)
+    for car in cars:
+        # Convert car position to screen coordinates
+        car_screen_x = car['x'] * CELL_SIZE
+        car_screen_y = (car['y'] - camera_y) * CELL_SIZE
+        car_width = car['length'] * CELL_SIZE
+        car_height = car['width'] * CELL_SIZE
+        
+        # Skip cars that are completely outside the visible area
+        if car_screen_y + car_height < 0 or car_screen_y - car_height > SCREEN_HEIGHT:
+            continue
+        
+        # Draw car as colored rectangle for PYNQ
+        car_color = car.get('color', RED)
+        car_rect = pygame.Rect(
+            car_screen_x - car_width / 2,
+            car_screen_y - car_height / 2,
+            car_width,
+            car_height
+        )
+        pygame.draw.rect(surface, car_color, car_rect)
+    
+    # Draw player with hopping animation
+    hop_height = get_hop_height()
+    
+    # Get actual player position for rendering
+    player_screen_x = player_x * CELL_SIZE
+    player_screen_y = (player_y - camera_y - hop_height) * CELL_SIZE
+    player_radius = CELL_SIZE * 0.4
+    
+    # Draw simple player shadow
+    shadow_radius = player_radius * 0.8
+    pygame.draw.circle(surface, (50, 50, 50), 
+                     (int(player_screen_x), int((player_y - camera_y) * CELL_SIZE)), 
+                     int(shadow_radius))
+    
+    # Draw player as blue circle
+    pygame.draw.circle(surface, BLUE, 
+                     (int(player_screen_x), int(player_screen_y)), 
+                     int(player_radius))
+    
+    # Draw score and difficulty (simplified for PYNQ)
+    temp_font = pygame.font.SysFont('Arial', 20)
+    score_text = temp_font.render(f"Score: {score}   Difficulty: {DIFFICULTY}/10", True, WHITE)
+    surface.blit(score_text, (10, 10))
+    
+    # Draw message if provided
+    if message:
+        message_text = temp_font.render(message, True, YELLOW)
+        text_rect = message_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+        # Draw a background for the message
+        bg_rect = text_rect.inflate(20, 20)
+        pygame.draw.rect(surface, BLACK, bg_rect)
+        pygame.draw.rect(surface, WHITE, bg_rect, 2)
+        surface.blit(message_text, text_rect)
 
 def load_textures():
     """Load texture files from the textures folder"""
@@ -984,7 +1238,7 @@ def game_loop():
     
     while True:
         # Handle input
-        movement = get_input()
+        movement = get_input_PYNQ() if PYNQ_AVAILABLE else get_input()
         if movement == 'Q':
             break
         elif movement == 'R' and game_over:
@@ -1022,7 +1276,7 @@ def game_loop():
         message = None
         if game_over:
             message = f"Game Over! Final Score: {score} - Press R to restart"
-        output(message)
+        output_PYNQ(message) if PYNQ_AVAILABLE else output(message)
         
         # Cap the frame rate
         clock.tick(FPS)
