@@ -2,6 +2,7 @@ import pygame
 import random
 import sys
 import math
+import os
 
 # Initialize pygame
 pygame.init()
@@ -30,6 +31,15 @@ RED = (200, 0, 0)
 BLUE = (0, 0, 200)
 GRAY = (100, 100, 100)
 YELLOW = (255, 255, 0)
+
+# Texture settings
+USE_TEXTURES = True  # Set to False to use simple colored shapes
+TEXTURES = {
+    'player': None,
+    'grass': None,
+    'road': None,
+    'cars': []  # Will hold multiple car textures
+}
 
 # Game difficulty settings
 DIFFICULTY = 5  # Default difficulty (1-10 scale)
@@ -60,6 +70,71 @@ screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Crossy Roads")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont('Arial', 20)
+
+def load_textures():
+    """Load texture files from the textures folder"""
+    global TEXTURES
+    
+    # Define the base directory for textures
+    base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'textures')
+    
+    # Try to load player texture
+    player_path = os.path.join(base_dir, 'player', 'player.png')
+    if os.path.exists(player_path):
+        try:
+            TEXTURES['player'] = pygame.image.load(player_path).convert_alpha()
+            # Scale the texture to fit the cell size
+            TEXTURES['player'] = pygame.transform.scale(TEXTURES['player'], (int(CELL_SIZE * 0.8), int(CELL_SIZE * 0.8)))
+            print(f"Loaded player texture: {player_path}")
+        except Exception as e:
+            print(f"Failed to load player texture: {e}")
+            TEXTURES['player'] = None
+    
+    # Try to load grass texture
+    grass_path = os.path.join(base_dir, 'grass', 'grass.png')
+    if os.path.exists(grass_path):
+        try:
+            TEXTURES['grass'] = pygame.image.load(grass_path).convert()
+            # Scale the texture to fit the cell size
+            TEXTURES['grass'] = pygame.transform.scale(TEXTURES['grass'], (CELL_SIZE, CELL_SIZE))
+            print(f"Loaded grass texture: {grass_path}")
+        except Exception as e:
+            print(f"Failed to load grass texture: {e}")
+            TEXTURES['grass'] = None
+    
+    # Try to load road texture
+    road_path = os.path.join(base_dir, 'road', 'road.png')
+    if os.path.exists(road_path):
+        try:
+            TEXTURES['road'] = pygame.image.load(road_path).convert()
+            # Scale the texture to fit the cell size
+            TEXTURES['road'] = pygame.transform.scale(TEXTURES['road'], (CELL_SIZE, CELL_SIZE))
+            print(f"Loaded road texture: {road_path}")
+        except Exception as e:
+            print(f"Failed to load road texture: {e}")
+            TEXTURES['road'] = None
+    
+    # Try to load car textures
+    cars_dir = os.path.join(base_dir, 'cars')
+    if os.path.exists(cars_dir):
+        car_files = [f for f in os.listdir(cars_dir) if f.endswith(('.png', '.jpg'))]
+        for car_file in car_files:
+            car_path = os.path.join(cars_dir, car_file)
+            try:
+                car_texture = pygame.image.load(car_path).convert_alpha()
+                # Don't scale cars here, as they come in different sizes
+                TEXTURES['cars'].append(car_texture)
+                print(f"Loaded car texture: {car_path}")
+            except Exception as e:
+                print(f"Failed to load car texture {car_file}: {e}")
+    
+    # Check if we have any textures
+    if TEXTURES['player'] is None and TEXTURES['grass'] is None and TEXTURES['road'] is None and not TEXTURES['cars']:
+        global USE_TEXTURES
+        USE_TEXTURES = False
+        print("No textures found, using simple shapes.")
+    else:
+        print("Texture loading complete. Using available textures.")
 
 def change_difficulty(new_difficulty):
     """Change the game difficulty (1-10 scale)"""
@@ -148,6 +223,9 @@ def create_car(x, lane_y, lane_height, speed):
         random.randint(0, 200)
     )
     
+    # Select a random car texture index if textures are available
+    texture_index = random.randint(0, len(TEXTURES['cars'])-1) if TEXTURES['cars'] else -1
+    
     return {
         'x': x,
         'y': lane_y,
@@ -156,7 +234,8 @@ def create_car(x, lane_y, lane_height, speed):
         'speed': speed,
         'length': car_length,
         'width': lane_height * 0.8,
-        'color': car_color
+        'color': car_color,
+        'texture_index': texture_index
     }
 
 def initialize_game():
@@ -182,17 +261,14 @@ def initialize_game():
     # Set default difficulty
     change_difficulty(DIFFICULTY)
     
-    # Calculate the bottom of the visible screen
-    bottom_of_screen = camera_y + VISIBLE_GRID_HEIGHT + 10  # Add extra units for margin
-    
     # Create lanes starting from below the player and extending upward
     # First, create the initial safe zone where the player starts that extends beyond the screen
     initial_safe_zone_top = int(player_y) + 1  # Top of the safe zone
-    safe_zone_height = bottom_of_screen - initial_safe_zone_top + 15  # Ensure it extends beyond screen (+15 for extra margin)
     
+    # Create a massive safe zone that will definitely extend beyond the bottom of the screen
     initial_safe_zone = {
         'y': initial_safe_zone_top,  # Top of the safe zone
-        'height': max(20, int(safe_zone_height)),  # Make sure it's at least 20 units high
+        'height': 1000,  # Make it extremely large to ensure it covers the bottom of the screen
         'is_safe': True
     }
     lanes.append(initial_safe_zone)
@@ -674,7 +750,7 @@ def move_cars():
 def output(message=None):
     """Render the game to the pygame screen"""
     # Fill the background with black
-    screen.fill(BLACK)
+    screen.fill(GREEN)
     
     # Draw lanes (roads and safe zones)
     for lane in lanes:
@@ -685,34 +761,65 @@ def output(message=None):
         # Skip lanes that are completely outside the visible area
         if lane_bottom > VISIBLE_GRID_HEIGHT or lane_top < 0:
             continue
-        
+
         # Convert to screen coordinates
         screen_top = lane_top * CELL_SIZE
-        screen_height = lane_height * CELL_SIZE
         
-        # Draw the lane background
-        lane_rect = pygame.Rect(0, screen_top - screen_height, SCREEN_WIDTH, screen_height)
+        # Calculate visible portion of the lane
+        visible_top = min(screen_top, SCREEN_HEIGHT)
+        visible_bottom = max(0, screen_top - lane_height * CELL_SIZE)
+        visible_height = visible_top - visible_bottom
+        
+        # Create rectangle for the visible portion
+        lane_rect = pygame.Rect(0, visible_bottom, SCREEN_WIDTH, visible_height)
         
         if lane['is_safe']:
-            # Safe zone (plain green)
-            pygame.draw.rect(screen, GREEN, lane_rect)
+            # Safe zone (green grass)
+            if USE_TEXTURES and TEXTURES['grass'] is not None:
+                # Tile the grass texture for the visible portion only
+                for x in range(0, SCREEN_WIDTH, CELL_SIZE):
+                    for y in range(int(visible_bottom), int(visible_top), CELL_SIZE):
+                        screen.blit(TEXTURES['grass'], (x, y))
+            else:
+                # Fallback to solid color
+                pygame.draw.rect(screen, GREEN, lane_rect)
         else:
-            # Road with multiple lanes (gray)
-            pygame.draw.rect(screen, GRAY, lane_rect)
+            # Road with multiple lanes
+            if USE_TEXTURES and TEXTURES['road'] is not None:
+                # Tile the road texture for the visible portion only
+                for x in range(0, SCREEN_WIDTH, CELL_SIZE):
+                    for y in range(int(visible_bottom), int(visible_top), CELL_SIZE):
+                        screen.blit(TEXTURES['road'], (x, y))
+            else:
+                # Fallback to solid color
+                pygame.draw.rect(screen, GRAY, lane_rect)
+            
+            # Calculate the visible portion of the lane for drawing details
+            visible_lane_top = lane_top
+            visible_lane_bottom = max(0, lane_bottom)
+            visible_lane_height = visible_lane_top - visible_lane_bottom
             
             # Draw lane dividers for multi-lane roads
             if lane.get('num_lanes', 1) > 1:
                 for i in range(1, lane['num_lanes']):
-                    divider_y = screen_top - (i * screen_height / lane['num_lanes'])
-                    pygame.draw.line(screen, WHITE, (0, divider_y), (SCREEN_WIDTH, divider_y), 2)
+                    # Calculate divider position
+                    divider_y_pos = lane_top - (i * lane_height / lane['num_lanes'])
+                    # Only draw if visible
+                    if 0 <= divider_y_pos <= VISIBLE_GRID_HEIGHT:
+                        divider_y = divider_y_pos * CELL_SIZE
+                        pygame.draw.line(screen, WHITE, (0, divider_y), (SCREEN_WIDTH, divider_y), 2)
             
             # Draw central yellow line for each lane
             for i in range(lane.get('num_lanes', 1)):
-                central_y = screen_top - ((i + 0.5) * screen_height / lane.get('num_lanes', 1))
-                for x in range(0, SCREEN_WIDTH, 40):
-                    pygame.draw.line(screen, YELLOW, (x, central_y), (x + 20, central_y), 3)
+                # Calculate central line position
+                central_y_pos = lane_top - ((i + 0.5) * lane_height / lane.get('num_lanes', 1))
+                # Only draw if visible
+                if 0 <= central_y_pos <= VISIBLE_GRID_HEIGHT:
+                    central_y = central_y_pos * CELL_SIZE
+                    for x in range(0, SCREEN_WIDTH, 40):
+                        pygame.draw.line(screen, YELLOW, (x, central_y), (x + 20, central_y), 3)
     
-    # Draw cars (simple rectangles)
+    # Draw cars
     for car in cars:
         # Convert car position to screen coordinates
         car_screen_x = car['x'] * CELL_SIZE
@@ -724,16 +831,36 @@ def output(message=None):
         if car_screen_y + car_height < 0 or car_screen_y - car_height > SCREEN_HEIGHT:
             continue
         
-        # Draw car body - use stored color
-        car_color = car.get('color', RED)
+        # Determine car direction (for texture flipping)
+        is_facing_right = car['speed'] > 0
         
-        car_rect = pygame.Rect(
-            car_screen_x - car_width / 2,
-            car_screen_y - car_height / 2,
-            car_width,
-            car_height
-        )
-        pygame.draw.rect(screen, car_color, car_rect)
+        if USE_TEXTURES and TEXTURES['cars'] and car['texture_index'] >= 0 and car['texture_index'] < len(TEXTURES['cars']):
+            # Use car texture
+            car_texture = TEXTURES['cars'][car['texture_index']]
+            
+            # Scale texture to match car dimensions
+            scaled_texture = pygame.transform.scale(car_texture, (int(car_width), int(car_height)))
+            
+            # Flip the texture if car is moving left
+            if not is_facing_right:
+                scaled_texture = pygame.transform.flip(scaled_texture, True, False)
+            
+            # Calculate blit position (centered on car position)
+            blit_x = car_screen_x - car_width / 2
+            blit_y = car_screen_y - car_height / 2
+            
+            # Draw the car
+            screen.blit(scaled_texture, (blit_x, blit_y))
+        else:
+            # Fallback to rectangle with color
+            car_color = car.get('color', RED)
+            car_rect = pygame.Rect(
+                car_screen_x - car_width / 2,
+                car_screen_y - car_height / 2,
+                car_width,
+                car_height
+            )
+            pygame.draw.rect(screen, car_color, car_rect)
     
     # Draw player with hopping animation
     hop_height = get_hop_height()
@@ -749,8 +876,18 @@ def output(message=None):
     pygame.draw.circle(shadow_surface, (0, 0, 0, 128), (shadow_radius, shadow_radius), shadow_radius)
     screen.blit(shadow_surface, (player_screen_x - shadow_radius, (player_y - camera_y) * CELL_SIZE - shadow_radius))
     
-    # Draw player (blue circle)
-    pygame.draw.circle(screen, BLUE, (player_screen_x, player_screen_y), player_radius)
+    # Draw player (either texture or colored circle)
+    if USE_TEXTURES and TEXTURES['player'] is not None:
+        # Calculate blit position (centered on player position, adjusted for hop height)
+        texture_width, texture_height = TEXTURES['player'].get_size()
+        blit_x = player_screen_x - texture_width / 2
+        blit_y = player_screen_y - texture_height / 2
+        
+        # Draw the player texture
+        screen.blit(TEXTURES['player'], (blit_x, blit_y))
+    else:
+        # Fallback to blue circle
+        pygame.draw.circle(screen, BLUE, (player_screen_x, player_screen_y), player_radius)
     
     # Draw score and difficulty
     score_text = font.render(f"Score: {score}   Difficulty: {DIFFICULTY}/10", True, WHITE)
@@ -834,6 +971,9 @@ def spawn_new_cars():
 def game_loop():
     """Main game loop"""
     global game_over
+    
+    # Load textures first
+    load_textures()
     
     initialize_game()
     welcome_message = "Welcome to CrossyRoads! Use WASD or arrow keys to move. Press 1-0 to change difficulty."
