@@ -76,7 +76,10 @@ def change_difficulty(new_difficulty):
     CAR_DENSITY = 0.3 + (DIFFICULTY * 0.05)  # 0.35 to 0.8
     
     # Adjust maximum lanes per road based on difficulty
-    MAX_LANES_PER_ROAD = min(4, 1 + (DIFFICULTY // 3))  # 1 to 4 lanes
+    if DIFFICULTY >= 7:
+        MAX_LANES_PER_ROAD = 5  # Allow up to 5 lanes for difficulty 7+
+    else:
+        MAX_LANES_PER_ROAD = min(4, 1 + (DIFFICULTY // 3))  # 1 to 4 lanes for difficulty 1-6
     
     print(f"Difficulty set to {DIFFICULTY}")
     print(f"- Car speed: {MIN_CAR_SPEED:.3f} to {MAX_CAR_SPEED:.3f}")
@@ -163,7 +166,7 @@ def initialize_game():
     global hopping, hop_start_time, hop_direction, last_move_time
     
     player_x = int(GRID_WIDTH / 2)
-    player_y = 5  # Start at position 5 (to allow room for lanes below)
+    player_y = 5.0  # Start at position 5 (to allow room for lanes below), now a float for precise positioning
     target_player_x = player_x
     target_player_y = player_y
     camera_y = player_y - CAMERA_FOLLOW_OFFSET  # Position camera to show player in bottom third
@@ -179,18 +182,24 @@ def initialize_game():
     # Set default difficulty
     change_difficulty(DIFFICULTY)
     
+    # Calculate the bottom of the visible screen
+    bottom_of_screen = camera_y + VISIBLE_GRID_HEIGHT + 10  # Add extra units for margin
+    
     # Create lanes starting from below the player and extending upward
-    # First, create the initial safe zone where the player starts
+    # First, create the initial safe zone where the player starts that extends beyond the screen
+    initial_safe_zone_top = int(player_y) + 1  # Top of the safe zone
+    safe_zone_height = bottom_of_screen - initial_safe_zone_top + 15  # Ensure it extends beyond screen (+15 for extra margin)
+    
     initial_safe_zone = {
-        'y': player_y + 1,  # Just above the player's position
-        'height': 3,       # 3 units high (aligned with grid)
+        'y': initial_safe_zone_top,  # Top of the safe zone
+        'height': max(20, int(safe_zone_height)),  # Make sure it's at least 20 units high
         'is_safe': True
     }
     lanes.append(initial_safe_zone)
-    current_bottom_lane_y = player_y + 1  # Set this to the top of our initial safe zone
+    current_bottom_lane_y = initial_safe_zone_top  # Set this to the top of our initial safe zone
     
     # Generate lanes below the player first (to fill the bottom of the screen)
-    y = player_y - 2  # Start below the player
+    y = int(player_y) - 2  # Start below the player
     while y > player_y - 20:  # Generate enough lanes below
         # Create a road
         road_lane = create_lane(y, is_safe=False)
@@ -207,6 +216,36 @@ def initialize_game():
     
     # Add initial cars (but not in safe zones!)
     generate_cars(density_multiplier=CAR_DENSITY)
+    
+    # Ensure the player is positioned on a safe zone
+    is_player_safe = False
+    for lane in lanes:
+        if lane['is_safe']:
+            lane_top = lane['y']
+            lane_bottom = lane_top - lane['height']
+            if lane_top >= player_y >= lane_bottom:
+                # Player is in a safe zone, this is good
+                is_player_safe = True
+                break
+    
+    # If player is not in a safe zone, adjust their position
+    if not is_player_safe:
+        # Find the nearest safe zone
+        nearest_safe_y = None
+        min_distance = float('inf')
+        
+        for lane in lanes:
+            if lane['is_safe']:
+                lane_mid_y = lane['y'] - lane['height'] / 2
+                distance = abs(player_y - lane_mid_y)
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_safe_y = lane_mid_y
+        
+        if nearest_safe_y is not None:
+            player_y = nearest_safe_y
+            target_player_y = player_y
 
 def generate_cars(density_multiplier=1.0):
     """Generate cars for all lanes with adjustable density"""
@@ -426,6 +465,33 @@ def update_player_position(movement):
     elif target_player_x >= GRID_WIDTH:
         target_player_x = GRID_WIDTH - 1
         
+    # Check if the player is moving onto a car lane and adjust position
+    if movement['y'] != 0:  # Only check for vertical movement
+        for lane in lanes:
+            if not lane['is_safe']:  # Check if it's a car lane
+                lane_top = lane['y']
+                lane_bottom = lane_top - lane['height']
+                
+                # Check if target position falls within this lane
+                if lane_top >= target_player_y >= lane_bottom:
+                    # Find the closest sub-lane midpoint
+                    closest_midpoint = None
+                    closest_distance = float('inf')
+                    
+                    for sub_lane in lane['sub_lanes']:
+                        sub_lane_y = sub_lane['y']
+                        sub_lane_midpoint = sub_lane_y - 0.5  # Midpoint of a sub-lane with height 1
+                        
+                        distance = abs(target_player_y - sub_lane_midpoint)
+                        if distance < closest_distance:
+                            closest_distance = distance
+                            closest_midpoint = sub_lane_midpoint
+                    
+                    if closest_midpoint is not None:
+                        # Snap to the exact midpoint of the car lane
+                        target_player_y = closest_midpoint
+                    break
+    
     # Start hopping animation
     hopping = True
     hop_start_time = pygame.time.get_ticks()
@@ -476,6 +542,21 @@ def check_collision():
     global game_over
     
     player_radius = 0.4  # Player collision radius in grid units
+    
+    # First, check if player is in a car lane (not in a safe zone)
+    is_in_car_lane = False
+    for lane in lanes:
+        if not lane['is_safe']:  # It's a car lane
+            lane_top = lane['y']
+            lane_bottom = lane_top - lane['height']
+            
+            if lane_top >= player_y >= lane_bottom:
+                is_in_car_lane = True
+                break
+    
+    # If player is not in a car lane, they can't collide with cars
+    if not is_in_car_lane:
+        return False
     
     for car in cars:
         # Car dimensions
