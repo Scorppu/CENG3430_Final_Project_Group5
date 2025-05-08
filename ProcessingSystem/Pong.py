@@ -1,6 +1,7 @@
 import pygame
 import sys
 import time
+import random
 
 # --- Abstract Input Handler ---
 class InputHandler:
@@ -130,11 +131,21 @@ class PongGame:
         self.countdown_start_time = 0
         self.countdown_length = 3
         self.first_round = True
+        self.last_loser = None  # Track last point loser
 
-    def reset_ball(self):
+    def reset_ball(self, toward=None):
         self.ball.x = self.width//2 - self.ball_size//2
         self.ball.y = self.height//2 - self.ball_size//2
-        self.ball_speed = self.ball_speed_init.copy()
+        # Randomize vertical direction
+        y_dir = random.choice([-1, 1])
+        # Set horizontal direction toward the player who lost the last point
+        if toward == "left":
+            self.ball_speed = [-abs(self.ball_speed_init[0]), y_dir * abs(self.ball_speed_init[1])]
+        elif toward == "right":
+            self.ball_speed = [abs(self.ball_speed_init[0]), y_dir * abs(self.ball_speed_init[1])]
+        else:
+            # On first serve, randomize direction
+            self.ball_speed = [random.choice([-1, 1]) * abs(self.ball_speed_init[0]), y_dir * abs(self.ball_speed_init[1])]
 
     def move_paddles(self):
         # Left paddle movement
@@ -157,7 +168,7 @@ class PongGame:
             self.state = "COUNTDOWN"
             self.countdown_start_time = time.time()
             self.first_round = True
-            self.reset_ball()
+            self.reset_ball()  # Random direction for first serve
             time.sleep(0.2)  # debounce
 
     def handle_countdown(self):
@@ -188,11 +199,13 @@ class PongGame:
         # Score: left out
         if self.ball.left <= 0:
             self.scores[1] += 1
-            self.reset_ball()
+            self.last_loser = "left"  # Left lost the point
+            self.reset_ball(toward="left")
         # Score: right out
-        if self.ball.right >= self.width:
+        elif self.ball.right >= self.width:
             self.scores[0] += 1
-            self.reset_ball()
+            self.last_loser = "right"  # Right lost the point
+            self.reset_ball(toward="right")
         # Win check
         if self.scores[0] >= self.best_to:
             self.state = "GAME_OVER"
